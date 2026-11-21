@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ADHD Focus Timer</title>
+<style>
+  /*
+    This file is a browser port of the adhd_focus_timer.py desktop app.
+    Same ideas, same colors, same two features (shrinking-disk visual
+    countdown + focus/break sprints + the 5-task sprint checklist) --
+    just rebuilt in HTML/CSS/JS so it can live on GitHub Pages instead of
+    needing Python installed. See PUBLISHING.md for how to put this on
+    GitHub Pages with no command line / no git required.
+
+    Design choices carried over on purpose (same reasoning as the Python
+    version, re-explained here for the web-specific parts):
+
+    - WHY A SINGLE FILE: exactly like the desktop version, everything
+      (markup, styling, logic) lives in one file so there is nothing to
+      configure, no build step, and no separate files to keep in sync --
+      you can open this directly in a browser to test it, no server
+      needed.
+    - WHY A TARGET END-TIMESTAMP, NOT A COUNTDOWN: see the big comment
+      above startTimer() below -- identical reasoning to the Python
+      version's use of time.time() + seconds_left.
+  */
+  :root {
+    --color-focus: #3B82F6;    /* blue */
+    --color-break: #22C55E;    /* green */
+    --color-low: #F59E0B;      /* amber -- last 20% of a phase */
+    --color-track: #E5E7EB;    /* empty ring background */
+    --color-bg: #111827;       /* near-black page background */
+    --color-text: #F9FAFB;     /* near-white text */
+    --color-muted: #9CA3AF;
+    --color-field: #1F2937;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    display: flex; align-items: flex-start; justify-content: center;
+  }
+  #app {
+    width: 320px;
+    padding: 24px 16px;
+    text-align: center;
+  }
+  #mode-label {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    margin: 0 0 14px 0;
+  }
+
+  /* The shrinking-disk visual: a conic-gradient "pie" (colored from 0deg
+     up to a live percentage, transparent past that) with a smaller solid
+     circle of the page background sitting on top of its center. That
+     combination reads as a ring that drains, exactly like the arc drawn
+     on the Python version's tkinter Canvas -- just done with CSS instead
+     of pixel drawing. */
+  #ring-wrap {
+    position: relative;
+    width: 220px; height: 220px;
+    margin: 0 auto;
+    border-radius: 50%;
+  }
+  #ring {
+    position: absolute; inset: 0;
+    border-radius: 50%;
+    background: var(--color-track);
+  }
+  #ring-inner {
+    position: absolute;
+    top: 34px; left: 34px; right: 34px; bottom: 34px;
+    border-radius: 50%;
+    background: var(--color-bg);
+  }
+  #time-label {
+    font-family: Consolas, "SF Mono", monospace;
+    font-size: 40px;
+    font-weight: 700;
+    margin: 14px 0 2px 0;
+  }
+  #count-label {
+    font-size: 13px;
+    color: var(--color-muted);
+    margin-bottom: 12px;
+  }
+  .btn-row { display: flex; justify-content: center; gap: 8px; margin: 10px 0; }
+  button {
+    font: inherit; font-size: 13px;
+    background: #E5E7EB; color: #111827;
+    border: 1px solid #9CA3AF; border-radius: 6px;
+    padding: 8px 14px; cursor: pointer;
+  }
+  button:hover { background: #D1D5DB; }
+  button.small { padding: 4px 10px; font-size: 12px; }
+
+  #settings-row {
+    display: flex; justify-content: center; gap: 18px;
+    margin: 14px 0 6px 0;
+  }
+  .setting label {
+    display: block; font-size: 11px; color: var(--color-muted);
+    margin-bottom: 3px;
+  }
+  .setting input {
+    width: 48px; text-align: center; font-size: 14px;
+    background: var(--color-field); color: var(--color-text);
+    border: 1px solid #374151; border-radius: 4px; padding: 4px;
+  }
+
+  #tasks-section { margin-top: 20px; text-align: left; }
+  #tasks-header {
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  #tasks-header h2 { font-size: 15px; margin: 0; }
+  table#tasks-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  table#tasks-table th {
+    font-size: 11px; color: var(--color-muted); font-weight: 400;
+    text-align: left; padding-bottom: 4px;
+  }
+  table#tasks-table td { padding: 3px 0; }
+  .task-name {
+    width: 100%; background: var(--color-field); color: var(--color-text);
+    border: 1px solid #374151; border-radius: 4px; padding: 5px 6px;
+    font-size: 13px;
+  }
+  .task-name.done { color: #6B7280; text-decoration: line-through; }
+  .task-minutes {
+    width: 42px; text-align: center; background: var(--color-field);
+    color: var(--color-text); border: 1px solid #374151; border-radius: 4px;
+    padding: 5px 2px; font-size: 13px; margin-left: 6px;
+  }
+  .task-done { width: 34px; text-align: center; }
+  #task-total {
+    font-size: 12px; margin-top: 8px; color: var(--color-muted);
+  }
+
+  /* Brief whole-page flash on a phase change -- same non-modal "glance,
+     don't interrupt" idea as the desktop version's window flash. */
+  body.flash { background: var(--color-text) !important; transition: background 0.1s; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="mode-label">FOCUS</div>
+
+  <div id="ring-wrap">
+    <div id="ring"></div>
+    <div id="ring-inner"></div>
+  </div>
+
+  <div id="time-label">25:00</div>
+  <div id="count-label"></div>
+
+  <div class="btn-row">
+    <button id="start-pause-btn">Start</button>
+    <button id="reset-btn">Reset</button>
+    <button id="skip-btn">Skip &rarr;</button>
+  </div>
+
+  <div id="settings-row">
+    <div class="setting">
+      <label for="focus-input">Focus (min)</label>
+      <input id="focus-input" type="number" min="1" max="180" value="25">
+    </div>
+    <div class="setting">
+      <label for="break-input">Break (min)</label>
+      <input id="break-input" type="number" min="1" max="60" value="5">
+    </div>
+  </div>
+
+  <div id="tasks-section">
+    <div id="tasks-header">
+      <h2>Sprint Tasks</h2>
+      <button class="small" id="clear-tasks-btn">Clear</button>
+    </div>
+    <table id="tasks-table">
+      <thead><tr><th>Task</th><th>Min</th><th>Done</th></tr></thead>
+      <tbody id="tasks-body"></tbody>
+    </table>
+    <div id="task-total"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- settings you're most likely to want to tweak -----------------
+  var DEFAULT_FOCUS_MIN = 25;
+  var DEFAULT_BREAK_MIN = 5;
+  var LOW_TIME_FRACTION = 0.20;  // last 20% of a phase turns amber
+  var TASK_COUNT = 5;
+  var STORAGE_KEY = "adhd_focus_timer_daily_count";
+
+  // ---- elements -------------------------------------------------------
+  var modeLabel = document.getElementById("mode-label");
+  var ring = document.getElementById("ring");
+  var timeLabel = document.getElementById("time-label");
+  var countLabel = document.getElementById("count-label");
+  var startPauseBtn = document.getElementById("start-pause-btn");
+  var resetBtn = document.getElementById("reset-btn");
+  var skipBtn = document.getElementById("skip-btn");
+  var focusInput = document.getElementById("focus-input");
+  var breakInput = document.getElementById("break-input");
+  var tasksBody = document.getElementById("tasks-body");
+  var clearTasksBtn = document.getElementById("clear-tasks-btn");
+  var taskTotalLabel = document.getElementById("task-total");
+
+  // ---- state ------------------------------------------------------------
+  var state = {
+    mode: "focus",              // "focus" | "break"
+    focusMinutes: DEFAULT_FOCUS_MIN,
+    breakMinutes: DEFAULT_BREAK_MIN,
+    phaseTotalSeconds: DEFAULT_FOCUS_MIN * 60,
+    secondsLeft: DEFAULT_FOCUS_MIN * 60,
+    endTime: null,              // Date.now()-style ms timestamp, set while running
+    running: false,
+    completedToday: 0,
+  };
+
+  // ---- daily sprint count (localStorage == the browser's version of the
+  // small JSON file the desktop app writes to your home folder) ----------
+  function loadTodayCount() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return 0;
+      var data = JSON.parse(raw);
+      var today = new Date().toISOString().slice(0, 10);
+      return data.date === today ? (data.count || 0) : 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+  function saveTodayCount(count) {
+    try {
+      var today = new Date().toISOString().slice(0, 10);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ date: today, count: count }));
+    } catch (e) {
+      // best-effort only, never worth breaking the app over
+    }
+  }
+
+  // ---- a short, non-jarring beep using the Web Audio API -- no audio
+  // file needed, so the single-file / no-install property is preserved.
+  function playAlert() {
+    try {
+      var ctx = new (window.AudioContext || window.webkitAudioContext)();
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.35);
+    } catch (e) {
+      // Some browsers block audio until the user has interacted with the
+      // page at all; harmless to skip the beep if that happens.
+    }
+  }
+
+  function flashPage() {
+    document.body.classList.add("flash");
+    setTimeout(function () { document.body.classList.remove("flash"); }, 150);
+  }
+
+  function phaseColor(fractionLeft) {
+    var base = state.mode === "focus" ? "var(--color-focus)" : "var(--color-break)";
+    return fractionLeft <= LOW_TIME_FRACTION ? "var(--color-low)" : base;
+  }
+
+  // ---- drawing ------------------------------------------------------
+  function redraw() {
+    var fractionLeft = state.phaseTotalSeconds
+      ? state.secondsLeft / state.phaseTotalSeconds
+      : 0;
+    fractionLeft = Math.max(0, Math.min(1, fractionLeft));
+
+    var color = phaseColor(fractionLeft);
+    var degrees = 360 * fractionLeft;
+    // conic-gradient draws clockwise from the top, which is exactly the
+    // "shrinking pie" look the Python version got from a tkinter
+    // create_arc() call with a shrinking extent.
+    ring.style.background =
+      "conic-gradient(" + color + " " + degrees + "deg, var(--color-track) " + degrees + "deg)";
+
+    var total = Math.max(0, Math.ceil(state.secondsLeft));
+    var mins = Math.floor(total / 60);
+    var secs = total % 60;
+    var mmss = String(mins).padStart(2, "0") + ":" + String(secs).padStart(2, "0");
+    timeLabel.textContent = mmss;
+    timeLabel.style.color = color;
+    modeLabel.textContent = state.mode.toUpperCase();
+    modeLabel.style.color = color;
+    countLabel.textContent = "Focus sprints completed today: " + state.completedToday;
+
+    // Showing the countdown in the TAB TITLE matters a lot here: if you
+    // pin this tab (see PUBLISHING.md), you can see the time left without
+    // the tab even being focused -- the same "always visible" goal the
+    // desktop version solves with an always-on-top window.
+    document.title = mmss + " · " + state.mode.toUpperCase();
+  }
+
+  // ---- timer control --------------------------------------------------
+  function togglePause() {
+    state.running ? pause() : start();
+  }
+
+  function start() {
+    state.running = true;
+    // Exactly like the Python version: record a TARGET END TIME
+    // (Date.now() + secondsLeft) once, rather than subtracting a second
+    // every tick. setInterval/requestAnimationFrame timing always drifts
+    // a little; comparing against a fixed target timestamp cancels that
+    // drift out completely, so a 25-minute sprint is still accurate to
+    // the millisecond at minute 25.
+    state.endTime = Date.now() + state.secondsLeft * 1000;
+    startPauseBtn.textContent = "Pause";
+  }
+
+  function pause() {
+    state.running = false;
+    startPauseBtn.textContent = "Start";
+  }
+
+  function resetPhase() {
+    state.running = false;
+    startPauseBtn.textContent = "Start";
+    var totalSeconds = (state.mode === "focus" ? state.focusMinutes : state.breakMinutes) * 60;
+    state.phaseTotalSeconds = totalSeconds;
+    state.secondsLeft = totalSeconds;
+    redraw();
+  }
+
+  function skipPhase() {
+    advancePhase(false);
+  }
+
+  function advancePhase(completedNaturally) {
+    if (state.mode === "focus" && completedNaturally) {
+      state.completedToday += 1;
+      saveTodayCount(state.completedToday);
+    }
+    state.mode = state.mode === "focus" ? "break" : "focus";
+    var totalSeconds = (state.mode === "focus" ? state.focusMinutes : state.breakMinutes) * 60;
+    state.phaseTotalSeconds = totalSeconds;
+    state.secondsLeft = totalSeconds;
+    state.running = false;
+    startPauseBtn.textContent = "Start";
+    redraw();
+    playAlert();
+    flashPage();
+  }
+
+  function tick() {
+    if (state.running && state.endTime !== null) {
+      state.secondsLeft = (state.endTime - Date.now()) / 1000;
+      if (state.secondsLeft <= 0) {
+        state.secondsLeft = 0;
+        redraw();
+        advancePhase(true);
+      } else {
+        redraw();
+      }
+    }
+  }
+  setInterval(tick, 200); // smooth enough for the ring, cheap on battery
+
+  // ---- focus/break length inputs --------------------------------------
+  // Listening on "input" (fires on every keystroke) rather than only
+  // "change" (fires on blur) is the web equivalent of a bug we hit on the
+  // desktop version: a Spinbox there only applied a typed value once you
+  // clicked its tiny arrows. Using "input" here means typing "30" and
+  // clicking Start just works, with no extra click required.
+  function settingsChanged() {
+    var focusVal = parseInt(focusInput.value, 10);
+    var breakVal = parseInt(breakInput.value, 10);
+    if (!isNaN(focusVal) && focusVal > 0) state.focusMinutes = focusVal;
+    if (!isNaN(breakVal) && breakVal > 0) state.breakMinutes = breakVal;
+
+    if (!state.running) {
+      var totalSeconds = (state.mode === "focus" ? state.focusMinutes : state.breakMinutes) * 60;
+      state.phaseTotalSeconds = totalSeconds;
+      state.secondsLeft = totalSeconds;
+      redraw();
+    }
+    updateTaskTotal();
+  }
+  focusInput.addEventListener("input", settingsChanged);
+  breakInput.addEventListener("input", settingsChanged);
+
+  // ---- Sprint Tasks: the "fit it in the sprint" game -------------------
+  var tasks = [];
+  function buildTaskRows() {
+    for (var i = 0; i < TASK_COUNT; i++) {
+      var tr = document.createElement("tr");
+
+      var nameTd = document.createElement("td");
+      var nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.className = "task-name";
+      nameTd.appendChild(nameInput);
+
+      var minTd = document.createElement("td");
+      var minInput = document.createElement("input");
+      minInput.type = "number";
+      minInput.min = "0";
+      minInput.className = "task-minutes";
+      minTd.appendChild(minInput);
+
+      var doneTd = document.createElement("td");
+      doneTd.className = "task-done";
+      var doneInput = document.createElement("input");
+      doneInput.type = "checkbox";
+      doneTd.appendChild(doneInput);
+
+      tr.appendChild(nameTd);
+      tr.appendChild(minTd);
+      tr.appendChild(doneTd);
+      tasksBody.appendChild(tr);
+
+      var row = { nameInput: nameInput, minInput: minInput, doneInput: doneInput };
+      tasks.push(row);
+
+      minInput.addEventListener("input", updateTaskTotal);
+      doneInput.addEventListener("change", function (r) {
+        return function () {
+          r.nameInput.classList.toggle("done", r.doneInput.checked);
+        };
+      }(row));
+    }
+  }
+
+  function updateTaskTotal() {
+    var total = 0;
+    tasks.forEach(function (row) {
+      var v = parseInt(row.minInput.value, 10);
+      if (!isNaN(v) && v > 0) total += v;
+    });
+    var diff = total - state.focusMinutes;
+    if (diff > 0) {
+      taskTotalLabel.textContent = "Allocated: " + total + " min — " + diff +
+        " over your " + state.focusMinutes + "-min sprint";
+      taskTotalLabel.style.color = "var(--color-low)";
+    } else if (diff < 0) {
+      taskTotalLabel.textContent = "Allocated: " + total + " min — " + (-diff) +
+        " min still unassigned";
+      taskTotalLabel.style.color = "var(--color-muted)";
+    } else {
+      taskTotalLabel.textContent = "Allocated: " + total + " min — matches your sprint exactly";
+      taskTotalLabel.style.color = "var(--color-break)";
+    }
+  }
+
+  function clearTasks() {
+    tasks.forEach(function (row) {
+      row.nameInput.value = "";
+      row.minInput.value = "";
+      row.doneInput.checked = false;
+      row.nameInput.classList.remove("done");
+    });
+    updateTaskTotal();
+  }
+
+  // ---- wire up buttons, boot the app -----------------------------------
+  startPauseBtn.addEventListener("click", togglePause);
+  resetBtn.addEventListener("click", resetPhase);
+  skipBtn.addEventListener("click", skipPhase);
+  clearTasksBtn.addEventListener("click", clearTasks);
+
+  state.completedToday = loadTodayCount();
+  buildTaskRows();
+  updateTaskTotal();
+  redraw();
+})();
+</script>
+</body>
+</html>
